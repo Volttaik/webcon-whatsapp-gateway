@@ -1,25 +1,12 @@
-import { Pool } from "pg";
+import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
 
-export async function query<T = Record<string, unknown>>(
-  sql: string,
-  params: unknown[] = []
-): Promise<T[]> {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(sql, params);
-    return result.rows as T[];
-  } finally {
-    client.release();
-  }
-}
+export const supabase = createClient(supabaseUrl, supabaseKey);
 
 export interface WhatsappSession {
   phone_number: string;
@@ -49,12 +36,20 @@ export interface Agent {
   level: string;
 }
 
+export interface Message {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 export async function getSession(phone: string): Promise<WhatsappSession | null> {
-  const rows = await query<WhatsappSession>(
-    "SELECT * FROM whatsapp_sessions WHERE phone_number = $1",
-    [phone]
-  );
-  return rows[0] ?? null;
+  const { data, error } = await supabase
+    .from("whatsapp_sessions")
+    .select("*")
+    .eq("phone_number", phone)
+    .single();
+
+  if (error || !data) return null;
+  return data as WhatsappSession;
 }
 
 export async function upsertSession(
@@ -62,40 +57,60 @@ export async function upsertSession(
   userId: number | null,
   activeAgentId: number | null
 ): Promise<void> {
-  await query(
-    `INSERT INTO whatsapp_sessions (phone_number, user_id, active_agent_id, created_at, updated_at)
-     VALUES ($1, $2, $3, NOW()::text, NOW()::text)
-     ON CONFLICT (phone_number) DO UPDATE
-     SET user_id = $2, active_agent_id = $3, updated_at = NOW()::text`,
-    [phone, userId, activeAgentId]
-  );
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("whatsapp_sessions")
+    .upsert(
+      {
+        phone_number: phone,
+        user_id: userId,
+        active_agent_id: activeAgentId,
+        created_at: now,
+        updated_at: now,
+      },
+      { onConflict: "phone_number" }
+    );
+
+  if (error) throw new Error(`upsertSession: ${error.message}`);
 }
 
 export async function findAndActivateCode(
   code: string,
   phone: string
 ): Promise<WhatsappAgentCode | null> {
-  const rows = await query<WhatsappAgentCode>(
-    `UPDATE whatsapp_agent_codes
-     SET used = true, phone_number = $2, used_at = NOW()::text
-     WHERE code = $1 AND used = false
-     RETURNING *`,
-    [code.trim().toUpperCase(), phone]
-  );
-  return rows[0] ?? null;
+  const upperCode = code.trim().toUpperCase();
+  const now = new Date().toISOString();
+
+  const { data: rows, error: fetchErr } = await supabase
+    .from("whatsapp_agent_codes")
+    .select("*")
+    .eq("code", upperCode)
+    .eq("used", false)
+    .limit(1);
+
+  if (fetchErr || !rows || rows.length === 0) return null;
+
+  const record = rows[0] as WhatsappAgentCode;
+
+  const { error: updateErr } = await supabase
+    .from("whatsapp_agent_codes")
+    .update({ used: true, phone_number: phone, used_at: now })
+    .eq("id", record.id);
+
+  if (updateErr) throw new Error(`findAndActivateCode update: ${updateErr.message}`);
+
+  return { ...record, used: true, phone_number: phone, used_at: now };
 }
 
 export async function getAgent(agentId: number): Promise<Agent | null> {
-  const rows = await query<Agent>(
-    "SELECT id, name, subject, system_prompt, tone, level FROM agents WHERE id = $1",
-    [agentId]
-  );
-  return rows[0] ?? null;
-}
+  const { data, error } = await supabase
+    .from("agents")
+    .select("id, name, subject, system_prompt, tone, level")
+    .eq("id", agentId)
+    .single();
 
-export interface Message {
-  role: "user" | "assistant" | "system";
-  content: string;
+  if (error || !data) return null;
+  return data as Agent;
 }
 
 export async function getRecentMessages(
@@ -103,16 +118,30 @@ export async function getRecentMessages(
   agentId: number,
   limit = 10
 ): Promise<Message[]> {
-  const rows = await query<{ role: string; content: string }>(
-    `SELECT m.role, m.content
-     FROM messages m
-     JOIN conversations c ON m.conversation_id = c.id
-     WHERE c.user_id = $1 AND c.agent_id = $2
-     ORDER BY m.created_at DESC
-     LIMIT $3`,
-    [userId, agentId, limit]
-  );
-  return rows.reverse().map(r => ({ role: r.role as "user" | "assistant", content: r.content }));
+  const { data: convRows, error: convErr } = await supabase
+    .from("conversations")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("agent_id", agentId)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+
+  if (convErr || !convRows || convRows.length === 0) return [];
+
+  const convId = convRows[0].id;
+
+  const { data: msgRows, error: msgErr } = await supabase
+    .from("messages")
+    .select("role, content")
+    .eq("conversation_id", convId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (msgErr || !msgRows) return [];
+
+  return (msgRows as { role: string; content: string }[])
+    .reverse()
+    .map(r => ({ role: r.role as "user" | "assistant", content: r.content }));
 }
 
 export async function saveMessage(
@@ -121,31 +150,52 @@ export async function saveMessage(
   role: "user" | "assistant",
   content: string
 ): Promise<void> {
-  let rows = await query<{ id: number }>(
-    `SELECT id FROM conversations WHERE user_id = $1 AND agent_id = $2 ORDER BY updated_at DESC LIMIT 1`,
-    [userId, agentId]
-  );
+  const now = new Date().toISOString();
+
+  const { data: convRows, error: convFetchErr } = await supabase
+    .from("conversations")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("agent_id", agentId)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+
+  if (convFetchErr) throw new Error(`saveMessage fetch conv: ${convFetchErr.message}`);
 
   let convId: number;
-  if (rows.length === 0) {
-    const created = await query<{ id: number }>(
-      `INSERT INTO conversations (user_id, agent_id, title, message_count, created_at, updated_at)
-       VALUES ($1, $2, 'WhatsApp Chat', 0, NOW()::text, NOW()::text) RETURNING id`,
-      [userId, agentId]
-    );
-    convId = created[0].id;
+
+  if (!convRows || convRows.length === 0) {
+    const { data: newConv, error: createErr } = await supabase
+      .from("conversations")
+      .insert({
+        user_id: userId,
+        agent_id: agentId,
+        title: "WhatsApp Chat",
+        message_count: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .select("id")
+      .single();
+
+    if (createErr || !newConv) throw new Error(`saveMessage create conv: ${createErr?.message}`);
+    convId = newConv.id;
   } else {
-    convId = rows[0].id;
+    convId = convRows[0].id;
   }
 
-  await query(
-    `INSERT INTO messages (conversation_id, role, content, think_ms, created_at)
-     VALUES ($1, $2, $3, 0, NOW()::text)`,
-    [convId, role, content]
-  );
+  const { error: msgErr } = await supabase.from("messages").insert({
+    conversation_id: convId,
+    role,
+    content,
+    think_ms: 0,
+    created_at: now,
+  });
 
-  await query(
-    `UPDATE conversations SET message_count = message_count + 1, updated_at = NOW()::text WHERE id = $1`,
-    [convId]
-  );
+  if (msgErr) throw new Error(`saveMessage insert: ${msgErr.message}`);
+
+  await supabase
+    .from("conversations")
+    .update({ updated_at: now })
+    .eq("id", convId);
 }
