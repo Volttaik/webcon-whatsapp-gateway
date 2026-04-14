@@ -6,7 +6,6 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode-terminal";
@@ -18,7 +17,6 @@ const PORT       = Number(process.env.PORT ?? 4000);
 const AUTH_DIR   = path.join(process.cwd(), "baileys_auth");
 const logger     = pino({ level: "warn" });
 
-const store      = makeInMemoryStore({ logger });
 let qrCodeData: string | null = null;
 let isConnected               = false;
 let connectionStatus          = "disconnected";
@@ -36,8 +34,6 @@ async function startWhatsApp() {
     printQRInTerminal: false,
     browser: ["WebCon Gateway", "Chrome", "1.0.0"],
   });
-
-  store.bind(sock.ev);
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -101,6 +97,44 @@ async function startWhatsApp() {
 /* ─── Express status API ─── */
 const app = express();
 app.use(express.json());
+
+app.get("/", (_req, res) => {
+  const statusLabel = isConnected
+    ? "Connected"
+    : connectionStatus === "awaiting_qr"
+    ? "Awaiting QR scan"
+    : "Disconnected";
+  const badgeColor = isConnected ? "#22c55e" : "#f59e0b";
+
+  const qrSection = qrCodeData
+    ? `<div id="qr"></div>
+       <p style="color:#6b7280;font-size:13px">Scan with WhatsApp to connect</p>
+       <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+       <script>QRCode.toCanvas(document.createElement('canvas'),${JSON.stringify(qrCodeData)},{width:240},function(err,canvas){if(!err){document.getElementById('qr').appendChild(canvas);}});</script>`
+    : isConnected
+    ? `<p style="color:#22c55e;font-weight:bold">✅ WhatsApp is connected</p>`
+    : `<p style="color:#6b7280">No QR code yet — please wait or restart.</p>`;
+
+  res.send(`<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebCon WhatsApp Gateway</title>
+<style>
+  body{font-family:sans-serif;max-width:420px;margin:40px auto;text-align:center;padding:0 16px}
+  h2{margin-bottom:4px}
+  .badge{display:inline-block;padding:6px 18px;border-radius:20px;font-weight:bold;color:#fff;background:${badgeColor}}
+  .links{margin-top:20px;font-size:13px}
+  .links a{color:#6366f1;text-decoration:none;margin:0 8px}
+  #qr{margin:20px auto;display:inline-block}
+  #qr canvas{border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.12)}
+</style>
+</head>
+<body>
+<h2>WebCon WhatsApp Gateway</h2>
+<p><span class="badge">${statusLabel}</span></p>
+${qrSection}
+<div class="links"><a href="/status">Status</a> · <a href="/health">Health</a></div>
+</body></html>`);
+});
 
 app.get("/status", (_req, res) => {
   res.json({ connected: isConnected, status: connectionStatus });
