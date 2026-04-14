@@ -8,10 +8,9 @@ const WELCOME =
   "👋 Welcome to *WebCon*!\n\n" +
   "To get started, generate an activation code for one of your agents in the WebCon platform, then send:\n\n" +
   "  */int YOUR_CODE* — activate an agent\n" +
-  "  */reset NEW_CODE* — switch to a different agent\n\n" +
-  "Visit webcon.app to manage your agents.";
+  "  */reset NEW_CODE* — switch to a different agent";
 
-const INT_USAGE  = "Usage: */int YOUR_CODE*\n\nGenerate a code for your agent in the WebCon platform first.";
+const INT_USAGE   = "Usage: */int YOUR_CODE*\n\nGenerate a code for your agent in the WebCon platform first.";
 const RESET_USAGE = "Usage: */reset YOUR_CODE*\n\nGenerate a new code for your agent in the WebCon platform first.";
 
 export async function handleMessage(
@@ -20,10 +19,6 @@ export async function handleMessage(
 ): Promise<string> {
   const trimmed = text.trim();
   const lower   = trimmed.toLowerCase();
-
-  if (lower === "hi" || lower === "hello" || lower === "hey") {
-    return WELCOME;
-  }
 
   if (lower.startsWith("/int")) {
     const parts = trimmed.split(/\s+/);
@@ -58,6 +53,7 @@ export async function handleMessage(
   }
 
   const session = await getSession(phone);
+
   if (!session?.active_agent_id || !session?.user_id) {
     return WELCOME;
   }
